@@ -150,15 +150,6 @@ def enable_user_services(root, old_root):
         run_command(["chroot", root, "systemctl", "enable"] + systemd_units, check=False)
 
 
-def configure_system_for_zectl(boot_pool):
-    root_ds = os.path.join(boot_pool, "ROOT")
-    set_prop = run_command([
-        "zfs", "get", "-H", "-o", "value", "org.zectl:bootloader", root_ds
-    ]).stdout.strip() != 'grub'
-    if set_prop:
-        run_command(["zfs", "set", "org.zectl:bootloader=grub", root_ds])
-
-
 def read_license(root):
     license_path = os.path.join(root, "data/license")
     try:
@@ -392,6 +383,12 @@ def main():
                     for file in files:
                         exclude_list.append(os.path.relpath(os.path.join(walk_root, file), root_as_bytes))
 
+                # Mount /boot
+                boot_partition = get_partition(disks[0], 2)
+                run_command(["mkfs.ext4", boot_partition])
+                run_command(["mkdir",f"{root}/boot"])
+                run_command(["mount", boot_partition, f"{root}/boot"])
+
                 with tempfile.NamedTemporaryFile() as exclude_list_file:
                     exclude_list_file.write(b"\n".join(exclude_list))
                     exclude_list_file.flush()
@@ -538,9 +535,6 @@ def main():
                 if os.path.exists("/sys/firmware/efi"):
                     undo.append(["umount", f"{root}/sys/firmware/efi/efivars"])
 
-                run_command(["mount", "-t", "zfs", f"{pool_name}/grub", f"{root}/boot/grub"])
-                undo.append(["umount", f"{root}/boot/grub"])
-
                 # It will legitimately exit with code 2 if initramfs must be updated (which we'll do anyway)
                 write_progress(0.55, "Running autotune")
                 run_command(["chroot", root, "/usr/local/bin/truenas-autotune.py", "--skip-unknown"],
@@ -564,9 +558,6 @@ def main():
                 if configure_serial:
                     write_progress(0.58, "Configuring serial port")
                     configure_serial_port(root, os.path.join(root, "data/freenas-v1.db"))
-
-                # Set bootfs before running update-grub
-                run_command(["zpool", "set", f"bootfs={dataset_name}", pool_name])
 
                 write_progress(0.7, "Preparing NVDIMM configuration")
                 run_command(["chroot", root, "/usr/local/bin/truenas-nvdimm.py"])
@@ -618,7 +609,7 @@ def main():
                     for i, disk in enumerate(disks):
                         if old_root is None:
                             # Fresh installation - we know the layout
-                            efi_partition_number = 2
+                            efi_partition_number = 1
                             run_command([
                                 "chroot", root, "grub-install", "--target=i386-pc", f"/dev/{disk}"
                             ])
@@ -678,6 +669,7 @@ def main():
                                              "-l", "/EFI/debian/grubx64.efi"])
                         finally:
                             run_command(["chroot", root, "umount", "/boot/efi"])
+                            run_command(["chroot", root, "umount", "/boot"])
                 else:
                     write_progress(0.96, "No need to update grub in ESP")
             finally:
@@ -699,7 +691,6 @@ def main():
                     run_command(["zfs", "snapshot", f"{this_ds}@pristine"])
 
             run_command(["zfs", "set", f"mountpoint={mp}", this_ds])
-            run_command(["zfs", "set", 'org.zectl:bootloader=""', this_ds])
 
         run_command(["zfs", "set", "readonly=on", dataset_name])
         run_command(["zfs", "snapshot", f"{dataset_name}@pristine"])
@@ -710,7 +701,6 @@ def main():
             run_command(["zfs", "destroy", "-r", dataset_name])
         raise
 
-    configure_system_for_zectl(pool_name)
     write_progress(1.0, f"{'Installation' if is_fresh_install else 'Upgrade'} completed successfully")
 
 
