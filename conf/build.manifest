@@ -135,8 +135,7 @@ base-packages:
   install_recommends: true
 - name: cifs-utils
   install_recommends: true
-- name: nfs4xdr-acl-tools
-  install_recommends: true
+# python3-truenas-pyos owns the compatibility nfs4xdr_* links.
 - name: nfs4-acl-tools
   install_recommends: true
 - name: qemu-guest-agent
@@ -473,8 +472,13 @@ sources:
 - name: truenas_pylibvirt
   repo: https://github.com/truenas/truenas_pylibvirt
   branch: master
+  explicit_deps:
+    - truenas_pyos
 - name: truenas_pynetif
   repo: https://github.com/truenas/truenas_pynetif
+  branch: master
+- name: truenas_pydmi
+  repo: https://github.com/truenas/truenas_pydmi
   branch: master
 - name: truenas_pylibzfs
   repo: https://github.com/truenas/truenas_pylibzfs
@@ -571,8 +575,8 @@ sources:
   repo: https://github.com/truenas/truenas_connect_utils
   branch: master
 - name: truenas_installer
-  repo: https://github.com/truenas/truenas-installer
-  branch: master
+  repo: https://github.com/tomhense/truenas-installer
+  branch: custom
 - name: scst
   repo: https://github.com/truenas/scst
   generate_version: false
@@ -656,6 +660,8 @@ sources:
 - name: apps_validation
   repo: https://github.com/truenas/apps_validation
   branch: master
+  explicit_deps:
+    - truenas_pyos
 - name: py_cryptit
   repo: https://github.com/truenas/py-cryptit
   branch: master
@@ -669,9 +675,19 @@ sources:
   repo: https://github.com/truenas/py-nvme
   branch: master
 - name: truenas
-  repo: https://github.com/truenas/middleware
-  branch: master
+  repo: https://github.com/tomhense/truenas-middleware.git
+  branch: custom
   subdir: debian
+  prebuildcmd:
+    # The filesystem payload is built by the truenas_files subpackage.  The
+    # main package only needs the generated metadata in data/ and etc/.
+    - "sed -i 's/cp -aR data etc usr debian\\/truenas\\//cp -aR data etc debian\\/truenas\\//' debian/rules"
+    # These packages are installed separately from external .deb files during
+    # rootfs setup, so they cannot be hard dependencies here: apt installs
+    # truenas before the external-package hook runs.
+    - "sed -i -E '/^[[:space:]]*(python3-truenas-pylicensed|python3-truenas-pylibsed|rwd|truenas-file-manager|truenas-licensed|libtruenas-licensed-dev|truesearch|zectl)[[:space:]]*,[[:space:]]*$/d' debian/control"
+    # The custom package does not ship the generated *.truenas replacements.
+    - "sed -i '/etc\\/issue \\\\$/,/^done$/ s/^    dpkg-divert/    [ -e \\\"$file.truenas\\\" ] || continue\\n    dpkg-divert/' debian/postinst"
   subpackages:
     - name: middlewared
       explicit_deps:
@@ -681,6 +697,10 @@ sources:
         - truenas_pwenc
         - truenas_pyos
         - truenas_pyscstadmin
+      prebuildcmd:
+        # truenas_pylibzfs provides the replacement zectl compatibility
+        # command, so middlewared must not pull in the standalone package.
+        - "sed -i -E '/^[[:space:]]*zectl,[[:space:]]*$/d' debian/control"
       subdir: src/middlewared
     - name: middlewared-docs
       subdir: src/middlewared_docs
@@ -745,7 +765,7 @@ sources:
 ############################################################################
 extensions:
   nvidia:
-    current: "590.44.01"
+    current: "590.48.01"
 
 # External packages from various sources (GitHub releases, assets.sys.truenas.net)
 ############################################################################

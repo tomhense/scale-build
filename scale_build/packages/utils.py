@@ -24,11 +24,25 @@ def normalize_build_depends(build_depends_str):
     return deps
 
 
-def gather_build_time_dependencies(packages, deps, deps_list):
+def gather_build_time_dependencies(packages, deps, deps_list, visited=None):
+    """Collect source packages needed to build the dependencies in ``deps_list``.
+
+    Binary packages can share a source package, and dependency metadata can
+    contain cycles.  Keep track of the binary package names already traversed
+    so a cycle cannot recurse forever while still allowing each source package
+    to be added to ``deps``.
+    """
+    visited = set() if visited is None else visited
     for dep in filter(lambda p: p in packages, deps_list):
+        if dep in visited:
+            continue
+        visited.add(dep)
         deps.add(packages[dep].source_name)
         deps.update(gather_build_time_dependencies(
-            packages, deps, packages[dep].install_dependencies | packages[dep].build_dependencies
+            packages,
+            deps,
+            packages[dep].build_dependencies | packages[dep].install_dependencies,
+            visited,
         ))
     return deps
 

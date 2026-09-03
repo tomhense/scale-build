@@ -5,12 +5,10 @@ import os
 import shutil
 import tarfile
 import tempfile
-import time
 import json
 
 import requests
 
-from scale_build.exceptions import CallError
 from scale_build.utils.manifest import get_apt_repos, get_manifest
 from scale_build.utils.run import run
 from scale_build.utils.paths import CD_DIR, CD_FILES_DIR, CHROOT_BASEDIR, CONF_GRUB, PKG_DIR, RELEASE_DIR, TMP_DIR
@@ -55,6 +53,34 @@ def install_iso_packages_impl():
     os.makedirs(os.path.join(CHROOT_BASEDIR, 'boot/grub'), exist_ok=True)
     with open(os.path.join(CHROOT_BASEDIR, 'boot/grub/grub.cfg'), 'w') as f:
         f.write(grub_cfg)
+
+
+def rewrite_efi_grub_config(efi_img):
+    """Rewrite the GRUB config inside an EFI FAT image without loop devices."""
+    efi_img_path = os.path.join(RELEASE_DIR, os.path.relpath(efi_img.name, os.path.abspath(RELEASE_DIR)))
+    with tempfile.NamedTemporaryFile(dir=RELEASE_DIR) as grub_cfg_file:
+        grub_cfg_path = os.path.join(
+            RELEASE_DIR, os.path.relpath(grub_cfg_file.name, os.path.abspath(RELEASE_DIR))
+        )
+        run_in_chroot([
+            'mcopy', '-o', '-i', efi_img_path, '::/EFI/debian/grub.cfg', grub_cfg_path,
+        ])
+
+        grub_cfg_file.seek(0)
+        grub_cfg = grub_cfg_file.read().decode()
+        substr = 'source $prefix/x86_64-efi/grub.cfg'
+        if substr not in grub_cfg:
+            raise ValueError(f'Invalid grub.cfg:\n{grub_cfg}')
+
+        grub_cfg = grub_cfg.replace(substr, 'source $prefix/grub.cfg')
+        grub_cfg_file.seek(0)
+        grub_cfg_file.truncate()
+        grub_cfg_file.write(grub_cfg.encode())
+        grub_cfg_file.flush()
+
+        run_in_chroot([
+            'mcopy', '-o', '-i', efi_img_path, grub_cfg_path, '::/EFI/debian/grub.cfg',
+        ])
 
 
 def make_iso_file():
@@ -159,7 +185,8 @@ def make_iso_file():
                 with tarfile.open(f.name) as tf:
                     shutil.copyfileobj(tf.extractfile('./grub/efi.img'), efi_img)
 
-            efi_img.flush()
+                efi_img.flush()
+            rewrite_efi_grub_config(efi_img)
 
             run_in_chroot([
                 'grub-mkrescue',
@@ -169,43 +196,6 @@ def make_iso_file():
                 ),
                 CD_DIR,
             ])
-
-        lo = run(['losetup', '-f'], log=False).stdout.strip()
-        run(['losetup', '-P', lo, iso])
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                for i in itertools.count():
-                    try:
-                        run(['mount', f'{lo}p2', td])
-                        break
-                    except CallError:
-                        if i >= 10:
-                            raise
-                        else:
-                            # losetup --partscan instructs the kernel to scan the partition table and add separate
-                            # partition devices for each of the partitions it finds. However, this operation is
-                            # asynchronous which means losetup will return before all partition devices have been
-                            # initialized. This can result in a race condition where we try to access a partition device
-                            # before it's been initialized by the kernel.
-                            time.sleep(1)
-
-                try:
-                    grub_cfg_path = os.path.join(td, 'EFI/debian/grub.cfg')
-                    with open(grub_cfg_path) as f:
-                        grub_cfg = f.read()
-
-                    substr = 'source $prefix/x86_64-efi/grub.cfg'
-                    if substr not in grub_cfg:
-                        raise ValueError(f'Invalid grub.cfg:\n{grub_cfg}')
-
-                    grub_cfg = grub_cfg.replace(substr, 'source $prefix/grub.cfg')
-
-                    with open(grub_cfg_path, 'w') as f:
-                        f.write(grub_cfg)
-                finally:
-                    run(['umount', td])
-        finally:
-            run(['losetup', '-d', lo])
     finally:
         run(['umount', '-f', os.path.join(CHROOT_BASEDIR, CD_DIR)])
         run(['umount', '-f', os.path.join(CHROOT_BASEDIR, RELEASE_DIR)])
